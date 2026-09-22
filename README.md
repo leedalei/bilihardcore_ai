@@ -7,6 +7,20 @@ B 站硬核会员试炼的桌面答题工具。登录账号后，程序拉题、
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
 
+## 界面
+
+首页。登录、开始答题，以及这一轮的统计。
+
+![首页](assets/home.jpg)
+
+模型页。选择答题方式、模型和思考强度。
+
+![模型页](assets/model.jpg)
+
+答完后的统计和日志。
+
+![答题结果](assets/result.jpg)
+
 ## 答题方式
 
 在「模型」页切换，选择会记在本机，下次打开还是上次那一项。
