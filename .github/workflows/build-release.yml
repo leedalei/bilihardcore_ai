@@ -1,0 +1,444 @@
+name: 🚀 Build and Release Multi-Platform
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+      prerelease:
+        description: 'Mark as prerelease'
+        type: boolean
+        default: false
+      console_build:
+        description: 'Build console version (for debugging)'
+        type: boolean
+        default: false
+
+# 必要的权限设置
+permissions:
+  contents: write    # 用于创建release和访问仓库内容
+  packages: write    # 用于发布包（如果需要）
+  actions: read      # 用于读取workflow信息
+  pull-requests: read # 用于读取PR信息
+
+env:
+  PYTHON_VERSION: '3.10'
+  APP_NAME: 'BiliHardcore_AI'
+
+jobs:
+  build:
+    name: 🔨 Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            arch: x64
+            ext: .exe
+            artifact_name: windows-x64
+            package_ext: zip
+          - os: macos-latest
+            platform: macos
+            arch: arm64
+            ext: .app
+            artifact_name: macos-arm64
+            package_ext: zip
+          - os: macos-13
+            platform: macos
+            arch: x86_64
+            ext: .app
+            artifact_name: macos-x64
+            package_ext: zip
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+            ext: ''
+            artifact_name: linux-x64
+            package_ext: tar.gz
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: 📦 Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🖼️ Install Linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          
+          # Install essential Qt dependencies
+          sudo apt-get install -y \
+            libxcb-cursor0 \
+            libxcb-xinerama0 \
+            libxcb-randr0 \
+            libxcb-xtest0 \
+            libxcb-xfixes0 \
+            libxcb-shape0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-render-util0 \
+            libglib2.0-0 \
+            libfontconfig1 \
+            libxrender1 \
+            libdbus-1-3 \
+            libxkbcommon-x11-0 \
+            libxrandr2 \
+            libxss1 \
+            libxcursor1 \
+            libxcomposite1 \
+            libxi6 \
+            libxtst6
+            
+          # Install OpenGL/Mesa libraries (try different package names)
+          sudo apt-get install -y libopengl0 || \
+          sudo apt-get install -y libgl1-mesa-dev || \
+          sudo apt-get install -y libgl1-mesa-glx || \
+          echo "Warning: Could not install OpenGL libraries"
+          
+          # Install EGL libraries (optional)
+          sudo apt-get install -y libegl1-mesa || \
+          sudo apt-get install -y libegl1 || \
+          echo "Warning: Could not install EGL libraries"
+          
+          # Install audio libraries (try different package names for Ubuntu 24.04)
+          sudo apt-get install -y libasound2t64 || \
+          sudo apt-get install -y libasound2 || \
+          echo "Warning: Could not install audio libraries"
+
+      - name: 📝 Generate PyInstaller spec
+        run: |
+          # Set environment variables for spec generation
+          if [ "${{ matrix.platform }}" = "macos" ]; then
+            export PYINSTALLER_TARGET_ARCH="${{ matrix.arch }}"
+          fi
+          export CONSOLE_BUILD="${{ github.event.inputs.console_build || 'false' }}"
+          python build_spec.py
+        shell: bash
+
+      - name: 🛠️ Build with PyInstaller (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          # Use the generated spec file for consistent builds
+          pyinstaller --clean --noconfirm BiliHardcore_AI.spec
+
+      - name: 🛠️ Build with PyInstaller (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          # Use the generated spec file for consistent builds
+          pyinstaller --clean --noconfirm BiliHardcore_AI.spec
+
+      - name: 🛠️ Build with PyInstaller (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          # Use the generated spec file for consistent builds
+          pyinstaller --clean --noconfirm BiliHardcore_AI.spec
+
+      - name: 📝 Create build info
+        run: |
+          mkdir -p "dist/${{ env.APP_NAME }}"
+          cat > "dist/${{ env.APP_NAME }}/BUILD_INFO.txt" << EOF
+          Application: ${{ env.APP_NAME }}
+          Version: ${{ github.ref_name || github.event.inputs.version }}
+          Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          Platform: ${{ matrix.platform }}-${{ matrix.arch }}
+          Python Version: ${{ env.PYTHON_VERSION }}
+          Git Commit: ${{ github.sha }}
+          Git Branch: ${{ github.ref_name }}
+          Workflow: ${{ github.workflow }}
+          Console Build: ${{ github.event.inputs.console_build || 'false' }}
+          EOF
+        shell: bash
+
+      - name: 🧪 Test executable (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          exe_path="dist/${{ env.APP_NAME }}/${{ env.APP_NAME }}.exe"
+          if [ -f "$exe_path" ]; then
+            echo "[OK] Executable created successfully: $exe_path"
+            size=$(du -m "$exe_path" | cut -f1)
+            echo "[INFO] Executable size: ${size} MB"
+            
+            echo ""
+            echo "[INFO] Distribution contents:"
+            find "dist/${{ env.APP_NAME }}" -maxdepth 1 | while read item; do
+              if [ -d "$item" ] && [ "$item" != "dist/${{ env.APP_NAME }}" ]; then
+                echo "  [DIR] $(basename "$item")/"
+              elif [ -f "$item" ]; then
+                size=$(du -k "$item" | cut -f1)
+                echo "  [FILE] $(basename "$item") (${size} KB)"
+              fi
+            done
+          else
+            echo "[ERROR] Executable not found: $exe_path"
+            exit 1
+          fi
+        shell: bash
+
+      - name: 🧪 Test executable (Unix)
+        if: matrix.platform != 'windows'
+        run: |
+          if [ "${{ matrix.platform }}" = "macos" ]; then
+            app_path="dist/${{ env.APP_NAME }}.app"
+            exe_path="$app_path/Contents/MacOS/${{ env.APP_NAME }}"
+          else
+            exe_path="dist/${{ env.APP_NAME }}/${{ env.APP_NAME }}"
+          fi
+          
+          if [ -f "$exe_path" ] || [ -d "$app_path" ]; then
+            echo "[OK] Executable created successfully: $exe_path"
+            if [ -f "$exe_path" ]; then
+              size=$(du -m "$exe_path" | cut -f1)
+              echo "[INFO] Executable size: ${size} MB"
+            fi
+            
+            echo ""
+            echo "[INFO] Distribution contents:"
+            if [ "${{ matrix.platform }}" = "macos" ] && [ -d "$app_path" ]; then
+              find "dist" -maxdepth 3 -type f | head -20 | while read file; do
+                size=$(du -k "$file" | cut -f1)
+                echo "  [FILE] $(basename "$file") (${size} KB)"
+              done
+            else
+              find "dist/${{ env.APP_NAME }}" -maxdepth 1 | while read item; do
+                if [ -d "$item" ] && [ "$item" != "dist/${{ env.APP_NAME }}" ]; then
+                  echo "  [DIR] $(basename "$item")/"
+                elif [ -f "$item" ]; then
+                  size=$(du -k "$item" | cut -f1)
+                  echo "  [FILE] $(basename "$item") (${size} KB)"
+                fi
+              done
+            fi
+          else
+            echo "[ERROR] Executable not found: $exe_path"
+            exit 1
+          fi
+
+      - name: 📦 Create distribution package
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ github.event.inputs.version }}"
+          else
+            version="${{ github.ref_name }}"
+          fi
+          
+          echo "Creating package for version: $version"
+          
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            package_name="${{ env.APP_NAME }}-${version}-${{ matrix.artifact_name }}.zip"
+            cd dist
+            # Use 7zip or zip utility (available in GitHub Actions Windows runner)
+            7z a -tzip "../${package_name}" "${{ env.APP_NAME }}/*" || \
+            zip -r "../${package_name}" "${{ env.APP_NAME }}/" || \
+            echo "Warning: Could not create ZIP package"
+          elif [ "${{ matrix.platform }}" = "macos" ]; then
+            package_name="${{ env.APP_NAME }}-${version}-${{ matrix.artifact_name }}.zip"
+            cd dist
+            zip -r -9 "../${package_name}" "${{ env.APP_NAME }}/" || zip -r -9 "../${package_name}" "${{ env.APP_NAME }}.app/"
+          else
+            package_name="${{ env.APP_NAME }}-${version}-${{ matrix.artifact_name }}.tar.gz"
+            cd dist
+            tar -czf "../${package_name}" "${{ env.APP_NAME }}/"
+          fi
+          
+          cd ..
+          if [ -f "${package_name}" ]; then
+            size=$(du -m "${package_name}" | cut -f1)
+            echo "[OK] Package created: ${package_name} (${size} MB)"
+            echo "PACKAGE_NAME=${package_name}" >> $GITHUB_ENV
+          else
+            echo "[ERROR] Failed to create package: ${package_name}"
+            exit 1
+          fi
+        shell: bash
+
+      - name: 📤 Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-${{ matrix.artifact_name }}
+          path: ${{ env.PACKAGE_NAME }}
+          retention-days: 30
+          compression-level: 0
+
+  release:
+    name: 🚀 Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: always() && (needs.build.result == 'success')
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 📥 Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 📋 List artifacts
+        run: |
+          echo "Downloaded artifacts:"
+          find artifacts -type f -name "*.zip" -o -name "*.tar.gz" | sort
+
+      - name: 📝 Generate release notes
+        id: release_notes
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ github.event.inputs.version }}"
+          else
+            version="${{ github.ref_name }}"
+          fi
+          
+          commit_count=$(git rev-list --count HEAD)
+          commit_hash=$(git rev-parse --short HEAD)
+          
+          changelog=""
+          if [ -f "CHANGELOG.md" ]; then
+            changelog=$(awk "/^## \[$version\]/{flag=1; next} /^## \[/{flag=0} flag" CHANGELOG.md || echo "")
+          fi
+          
+          if [ -z "$changelog" ]; then
+            changelog="- Support multi-platform (Windows/macOS/Linux)
+          - Improved user interface experience  
+          - Fixed known issues
+          - Enhanced stability and performance"
+          fi
+          
+          cat > release_notes.md << EOF
+          # 🎯 B站硬核会员自动答题工具 ${version}
+          
+          ![Downloads](https://img.shields.io/github/downloads/${{ github.repository }}/${version}/total)
+          ![Release Date](https://img.shields.io/github/release-date/${{ github.repository }})
+          ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
+          
+          ## 📦 Download Instructions
+          
+          Please choose the version for your operating system:
+          
+          | OS | Architecture | Download Link | Notes |
+          |---------|------|----------|------|
+          | 🪟 **Windows** | x64 | [\`${{ env.APP_NAME }}-${version}-windows-x64.zip\`](https://github.com/${{ github.repository }}/releases/download/${version}/${{ env.APP_NAME }}-${version}-windows-x64.zip) | Windows 10/11 |
+          | 🍎 **macOS** | Apple Silicon (M1/M2) | [\`${{ env.APP_NAME }}-${version}-macos-arm64.zip\`](https://github.com/${{ github.repository }}/releases/download/${version}/${{ env.APP_NAME }}-${version}-macos-arm64.zip) | macOS 11.0+ |
+          | 🍎 **macOS** | Intel | [\`${{ env.APP_NAME }}-${version}-macos-x64.zip\`](https://github.com/${{ github.repository }}/releases/download/${version}/${{ env.APP_NAME }}-${version}-macos-x64.zip) | macOS 10.15+ |
+          | 🐧 **Linux** | x64 | [\`${{ env.APP_NAME }}-${version}-linux-x64.tar.gz\`](https://github.com/${{ github.repository }}/releases/download/${version}/${{ env.APP_NAME }}-${version}-linux-x64.tar.gz) | Ubuntu 20.04+ or other distributions |
+          
+          ## 🚀 Quick Start
+          
+          ### Windows Users
+          1. Download \`${{ env.APP_NAME }}-${version}-windows-x64.zip\`
+          2. Extract to any directory
+          3. Double-click \`${{ env.APP_NAME }}.exe\` to run
+          
+          ### macOS Users  
+          1. Download the appropriate architecture zip file
+          2. Extract and drag to Applications folder
+          3. First run may require allowing in System Preferences
+          
+          ### Linux Users
+          1. Download \`${{ env.APP_NAME }}-${version}-linux-x64.tar.gz\`
+          2. Extract: \`tar -xzf ${{ env.APP_NAME }}-${version}-linux-x64.tar.gz\`
+          3. Run: \`cd ${{ env.APP_NAME }} && ./${{ env.APP_NAME }}\`
+          
+          ## 📋 Changelog
+          
+          ${changelog}
+          
+          ## ⚠️ Important Notes
+          
+          - **First Run**: Ensure network connection is available
+          - **Linux Users**: May need to install additional system dependencies (see below)
+          - **Usage Guide**: See [README.md](https://github.com/${{ github.repository }}/blob/main/README.md)
+          - **Report Issues**: Please report at [Issues](https://github.com/${{ github.repository }}/issues)
+          
+          ## 🔧 System Requirements
+          
+          | System | Minimum Version | Recommended |
+          |------|----------|----------|
+          | Windows | Windows 10 (1909) | Windows 11 |
+          | macOS | macOS 10.15 (Catalina) | macOS 12.0+ |
+          | Linux | Ubuntu 20.04 LTS | Ubuntu 22.04+ |
+          
+          ### Linux Dependencies
+          
+          **Ubuntu/Debian:**
+          \`\`\`bash
+          sudo apt update && sudo apt install -y libxcb-cursor0 libxcb-xinerama0 libopengl0
+          \`\`\`
+          
+          **CentOS/RHEL/Fedora:**
+          \`\`\`bash
+          sudo dnf install -y libxcb xcb-util-cursor mesa-libGL
+          \`\`\`
+          
+          ## 🛠️ Build Information
+          
+          - **Build Time**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          - **Git Commit**: ${commit_hash} (${commit_count} commits)
+          - **Python Version**: ${{ env.PYTHON_VERSION }}
+          - **Console Build**: ${{ github.event.inputs.console_build || 'false' }}
+          
+          ## 💝 Support Project
+          
+          If this project helps you, please consider:
+          - ⭐ Star the project
+          - 🐛 Report issues and suggestions
+          - 🔄 Share with friends
+          - 📝 Contribute code
+          
+          ---
+          
+          **Source Code**: [GitHub](https://github.com/${{ github.repository }})  
+          **Documentation**: [README.md](https://github.com/${{ github.repository }}/blob/main/README.md)  
+          **Report Issues**: [Issues](https://github.com/${{ github.repository }}/issues)
+          EOF
+          
+          echo "version=${version}" >> $GITHUB_OUTPUT
+          echo "is_prerelease=${{ github.event.inputs.prerelease || 'false' }}" >> $GITHUB_OUTPUT
+
+      - name: 🏷️ Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_notes.outputs.version }}
+          name: ${{ env.APP_NAME }} ${{ steps.release_notes.outputs.version }}
+          body_path: release_notes.md
+          draft: false
+          prerelease: ${{ steps.release_notes.outputs.is_prerelease }}
+          files: |
+            artifacts/**/*.zip
+            artifacts/**/*.tar.gz
+          make_latest: ${{ steps.release_notes.outputs.is_prerelease != 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🎉 Success notification
+        run: |
+          echo "[SUCCESS] Release created successfully!"
+          echo "[INFO] Packages built for all platforms:"
+          find artifacts -name "*.zip" -o -name "*.tar.gz" | sort | while read file; do
+            size=$(du -h "$file" | cut -f1)
+            echo "  [FILE] $(basename "$file") ($size)"
+          done
+          echo ""
+          echo "[INFO] Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.release_notes.outputs.version }}"
+          echo "[INFO] View release: https://github.com/${{ github.repository }}/releases/latest" 
